@@ -186,12 +186,17 @@ async def ai_translate_image_gemini(image_bytes: bytes, target_lang_name: str) -
     """
     b64 = base64.b64encode(image_bytes).decode("utf-8")
 
-    prompt = f"""Извлеки весь текст с изображения, определи язык и переведи на {target_lang_name}.
+    prompt = f"""Extract ALL visible text from the image (including small text, watermarks, prices, labels).
+Do NOT describe the image, ONLY extract text.
+Detect the language of the extracted text.
+Translate it to {target_lang_name}.
 
-Формат:
-ORIGINAL: <текст>
-LANG: <язык>
-TRANSLATED: <перевод>"""
+Reply in this exact format:
+ORIGINAL: <all extracted text>
+LANG: <language name>
+TRANSLATED: <translation>
+
+If no text found, reply: ORIGINAL: [no text]"""
 
     payload = {
         "contents": [{
@@ -315,31 +320,35 @@ async def on_photo(message: Message, state: FSMContext):
         await message.answer(f"❌ Не удалось загрузить фото: {e}")
         return
 
-    # Vision: Groq → Gemini fallback
+    # Vision: Gemini primary → Groq fallback
     parsed = None
-    used_model = "Groq"
+    used_model = "Gemini"
 
-    try:
-        parsed = await ai_translate_image_groq(image_bytes, tgt_name)
-    except Exception as e_groq:
-        if GOOGLE_API_KEY:
+    if GOOGLE_API_KEY:
+        try:
+            parsed = await ai_translate_image_gemini(image_bytes, tgt_name)
+        except Exception as e_gemini:
             try:
-                parsed = await ai_translate_image_gemini(image_bytes, tgt_name)
-                used_model = "Gemini"
-            except Exception as e_gemini:
+                parsed = await ai_translate_image_groq(image_bytes, tgt_name)
+                used_model = "Groq"
+            except Exception as e_groq:
                 await status_msg.delete()
                 await message.answer(
-                    f"❌ Groq Vision: {e_groq}\n❌ Gemini fallback: {e_gemini}"
+                    f"❌ Gemini Vision: {e_gemini}\n❌ Groq fallback: {e_groq}"
                 )
                 return
-        else:
+    else:
+        try:
+            parsed = await ai_translate_image_groq(image_bytes, tgt_name)
+            used_model = "Groq"
+        except Exception as e_groq:
             await status_msg.delete()
             await message.answer(f"❌ Ошибка Vision AI: {e_groq}")
             return
 
     await status_msg.delete()
 
-    if not parsed or not parsed.get("original") or parsed["original"] == "[нет текста]":
+    if not parsed or not parsed.get("original") or parsed["original"] in ("[нет текста]", "[no text]"):
         await message.answer("🦆 Текст на фото не найден.")
         return
 
