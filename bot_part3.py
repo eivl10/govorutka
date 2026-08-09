@@ -37,18 +37,9 @@ router = Router()
 # ─── Маппинг редких DeepL-кодов → поддерживаемым в LANGUAGES ───────────────
 # DeepL для коротких фраз может вернуть нестандартные коды (HR, ST, LMO и т.д.)
 DEEPL_ALIAS_MAP = {
-    "HR": "BS",    # Хорватский → Сербский (BS в DeepL)
-    "SR": "BS",    # Сербский → BS
-    "ST": "EN",    # Sesotho → EN
-    "TS": "EN",    # Tsonga (возвращается для "hi") → EN
-    "AZ": "EN",    # Азербайджанский (возвращается для "salam") → EN
-    "VI": "EN",    # Вьетнамский (возвращается для "ikigai") → EN
-    "WO": "EN",    # Волоф (возвращается для "ok","wow") → EN
     "PAM": "EN",   # Пампанган (возвращается для "bye") → EN
-    "KY": "RU",    # Киргизский → Русский
     "LMO": "IT",   # Lombard → Итальянский
-    "NB": "DA",    # Норвежский букмол → Датский
-    "NO": "DA",    # Норвежский → Датский
+    "NO": "NB",    # Норвежский → Норвежский (bokmål)
     "EN-US": "EN",
     "EN-GB": "EN",
     "PT-BR": "PT",
@@ -56,6 +47,10 @@ DEEPL_ALIAS_MAP = {
     "ZH": "ZH",
     "ZH-HANS": "ZH",
     "ZH-HANT": "ZH",
+    "PAG": "EN",   # Pangasinan → EN (для "hey how ya doin")
+    "ILO": "EN",   # Ilokano → EN
+    "CEB": "EN",   # Cebuano → EN  
+    "HMN": "EN",   # Hmong → EN
 }
 
 # ─── Клиенты API ─────────────────────────────────────────────────────────────
@@ -73,9 +68,12 @@ increment_chars = None
 
 # Маппинг DeepL-кодов в Google TTS коды
 GOOGLE_TTS_LANGS = {
+    "AF": "af",
     "AR": "ar",
     "BG": "bg",
-    "BS": "sr",  # Сербский
+    "BN": "bn",
+    "BS": "bs",
+    "CA": "ca",
     "CS": "cs",
     "DA": "da",
     "DE": "de",
@@ -85,25 +83,61 @@ GOOGLE_TTS_LANGS = {
     "ET": "et",
     "FI": "fi",
     "FR": "fr",
+    "GU": "gu",
+    "HE": "iw",
+    "HI": "hi",
+    "HR": "hr",
     "HU": "hu",
     "ID": "id",
+    "IS": "is",
     "IT": "it",
     "JA": "ja",
     "KO": "ko",
-    "LT": "lt",
+    "LA": "la",
     "LV": "lv",
+    "ML": "ml",
+    "MR": "mr",
+    "MS": "ms",
+    "MY": "my",
+    "NB": "no",
+    "NE": "ne",
     "NL": "nl",
     "PL": "pl",
     "PT": "pt",
     "RO": "ro",
     "RU": "ru",
     "SK": "sk",
+    "SQ": "sq",
+    "SR": "sr",
+    "SU": "su",
     "SV": "sv",
+    "SW": "sw",
+    "TA": "ta",
+    "TE": "te",
+    "TH": "th",
+    "TL": "tl",
     "TR": "tr",
     "UK": "uk",
+    "UR": "ur",
+    "VI": "vi",
     "ZH": "zh-CN",
 }
 
+
+
+from aiogram.types import BufferedInputFile
+
+async def send_translation(bot_obj, chat_id, text, reply_markup, auto_speech=False, translated_text="", target_lang="en"):
+    # Отправляет текст
+    await bot_obj.send_message(chat_id, text, reply_markup=reply_markup, parse_mode="Markdown")
+    # Озвучивает если надо
+    if auto_speech and translated_text:
+        try:
+            audio_data = await synthesize_speech(translated_text, target_lang)
+            audio_file = BufferedInputFile(audio_data, filename="speech.mp3")
+            await bot_obj.send_voice(chat_id=chat_id, voice=audio_file)
+        except Exception:
+            pass
 
 async def synthesize_speech(text: str, lang_code: str) -> bytes:
     """
@@ -250,6 +284,27 @@ def google_to_deepl_code(google_code: str) -> str | None:
     return None
 
 
+# ISO 639-1 код langdetect → DeepL код
+_LANGDETECT_TO_DEEPL = {
+    "en": "EN", "ru": "RU", "de": "DE", "fr": "FR", "es": "ES",
+    "it": "IT", "nl": "NL", "pl": "PL", "pt": "PT", "ja": "JA",
+    "zh-cn": "ZH", "zh-tw": "ZH", "ko": "KO", "ar": "AR", "tr": "TR",
+    "sv": "SV", "da": "DA", "fi": "FI", "nb": "DA", "cs": "CS",
+    "ro": "RO", "hu": "HU", "sk": "SK", "bg": "BG", "uk": "UK",
+    "hr": "BS", "bs": "BS", "sl": "SL", "et": "ET", "lv": "LV",
+    "lt": "LT", "id": "ID", "ms": "MS", "vi": "VI",
+}
+
+def detect_language_langdetect(text: str) -> str | None:
+    """Офлайн детект через langdetect. Возвращает DeepL-код или None."""
+    try:
+        from langdetect import detect, LangDetectException
+        lang = detect(text)
+        return _LANGDETECT_TO_DEEPL.get(lang)
+    except Exception:
+        return None
+
+
 async def transcribe_voice(file_bytes: bytes, filename: str = "audio.ogg") -> str:
     """Транскрибируем голосовое через Groq Whisper API."""
     url = "https://api.groq.com/openai/v1/audio/transcriptions"
@@ -341,19 +396,9 @@ async def on_text(message: Message, state: FSMContext):
 
     # ── Определяем язык входящего текста ─────────────────────────────────────
     detected_deepl = None
-    word_count = len(text.split())
 
-    # Для коротких фраз (≤ 4 слов) Google Translate надёжнее DeepL
-    # DeepL для "hi", "ok", "bye" возвращает языки малых народов (TS, WO, PAM)
-    if word_count <= 4:
-        try:
-            detected_google = await detect_language_google(text)
-            detected_deepl = google_to_deepl_code(detected_google)
-        except Exception:
-            detected_deepl = None
-
-    # Для длинных фраз или если Google не сработал — используем DeepL
-    if detected_deepl is None and deepl_translator is not None:
+    # Шаг 1: DeepL
+    if deepl_translator is not None:
         try:
             import asyncio as _asyncio
             result = await _asyncio.get_event_loop().run_in_executor(
@@ -370,6 +415,21 @@ async def on_text(message: Message, state: FSMContext):
                     detected_deepl = prefix
                 elif prefix in DEEPL_ALIAS_MAP and DEEPL_ALIAS_MAP[prefix] in LANGUAGES:
                     detected_deepl = DEEPL_ALIAS_MAP[prefix]
+                # иначе — DeepL вернул совсем экзотический код, идём ниже
+        except Exception:
+            detected_deepl = None
+
+    # Шаг 2: если DeepL не справился → langdetect (офлайн, надёжен)
+    if detected_deepl is None:
+        detected_deepl = detect_language_langdetect(text)
+
+    # Шаг 3: последний резерв — Google
+    if detected_deepl is None:
+        try:
+            detected_google = await detect_language_google(text)
+            candidate = google_to_deepl_code(detected_google)
+            if candidate and candidate in LANGUAGES:
+                detected_deepl = candidate
         except Exception:
             detected_deepl = None
 
@@ -387,10 +447,7 @@ async def on_text(message: Message, state: FSMContext):
             kb = kb_after_translation(detected_deepl, source, text_hash, translated_hash)
             src_flag = LANGUAGES[detected_deepl][1]
             tgt_flag = LANGUAGES[source][1]
-            await message.answer(
-                translated,
-                reply_markup=kb
-            )
+            await send_translation(message.bot, uid, translated, kb, settings.get("auto_speech", False), translated, source)
         except Exception as e:
             await message.answer(f"❌ Ошибка перевода: {e}")
         return
@@ -411,10 +468,7 @@ async def on_text(message: Message, state: FSMContext):
             kb = kb_after_translation(source, target, text_hash, translated_hash)
             src_flag = LANGUAGES[source][1]
             tgt_flag = LANGUAGES[target][1]
-            await message.answer(
-                translated,
-                reply_markup=kb
-            )
+            await send_translation(message.bot, uid, translated, kb, settings.get("auto_speech", False), translated, target)
         except Exception as e:
             await message.answer(f"❌ Ошибка перевода: {e}")
     else:
@@ -500,7 +554,7 @@ async def on_voice(message: Message, state: FSMContext):
             kb = kb_after_translation(detected_deepl, source, text_hash_tr, translated_hash)
             src_flag = LANGUAGES[detected_deepl][1]
             tgt_flag = LANGUAGES[source][1]
-            await message.answer(f"_{text}_\n{translated}", parse_mode="Markdown", reply_markup=kb)
+            await send_translation(message.bot, uid, f"_{text}_\n{translated}", kb, settings.get("auto_speech", False), translated, source)
         except Exception as e:
             await message.answer(f"❌ Ошибка перевода: {e}")
         return
@@ -517,7 +571,7 @@ async def on_voice(message: Message, state: FSMContext):
             kb = kb_after_translation(source, target, text_hash, translated_hash)
             src_flag = LANGUAGES[source][1]
             tgt_flag = LANGUAGES[target][1]
-            await message.answer(f"_{text}_\n{translated}", parse_mode="Markdown", reply_markup=kb)
+            await send_translation(message.bot, uid, f"_{text}_\n{translated}", kb, settings.get("auto_speech", False), translated, target)
         except Exception as e:
             await message.answer(f"❌ Ошибка перевода: {e}")
     else:
@@ -552,7 +606,7 @@ async def cb_translate(callback: CallbackQuery):
         kb = kb_after_translation(source, target, text_hash, translated_hash)
         src_flag = LANGUAGES[source][1]
         tgt_flag = LANGUAGES[target][1]
-        await callback.message.answer(translated, reply_markup=kb)
+        await send_translation(callback.bot, uid, translated, kb, settings.get("auto_speech", False), translated, target)
     except Exception as e:
         await callback.message.answer(f"❌ Ошибка перевода: {e}")
 

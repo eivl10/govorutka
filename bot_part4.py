@@ -10,6 +10,9 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
+import os
+import httpx
+
 import bot_part3  # для доступа к deepl_translator
 
 from bot_part1 import (
@@ -19,6 +22,7 @@ from bot_part1 import (
     get_translation_count, get_char_count,
     get_request_mode, set_request_mode,
     is_auto_approve_enabled, approve_user_auto,
+    get_user_settings, toggle_auto_speech, toggle_ai_detail
 )
 
 router = Router()
@@ -66,6 +70,7 @@ async def cmd_start(message: Message):
         "<i>Ну и если крякнешь на любом языке, который не исходный, то переведу на исходный. Попробуй.</i>\n\n"
         "<b>Кряманды:</b>\n"
         "/lang — кря языка\n"
+        "/settings — настройки озвучки и ИИ\n"
         "/stats — статистика переводов кря\n"
         "/rest — остаток кря DeepL кря\n\n"
         "Ну всё. Начни с кря языка по команде /lang. Кря! 🦆",
@@ -112,10 +117,28 @@ async def cmd_rest(message: Message):
         left = limit - used
         percent_used = round(used / limit * 100, 1)
 
+        groq_limit_text = ""
+        groq_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_KEY")
+        if groq_key:
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    resp = await client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {groq_key}"},
+                        json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
+                    )
+                    hdrs = {k.lower(): v for k, v in resp.headers.items()}
+                    tok_rem = hdrs.get("x-ratelimit-remaining-tokens-today", hdrs.get("x-ratelimit-remaining-tokens"))
+                    req_rem = hdrs.get("x-ratelimit-remaining-requests-today", hdrs.get("x-ratelimit-remaining-requests"))
+                    if tok_rem and req_rem:
+                        groq_limit_text = f"\n\n🤖 <b>Лимиты Groq (AI):</b>\nОстаток токенов: {tok_rem}\nОстаток запросов: {req_rem}"
+            except Exception:
+                pass
+
         await message.answer(
             f"<b>Кря!</b> Остаток DeepL 🦆\n\n"
             f"Использовано: {used:,} / {limit:,} символов ({percent_used}%)\n"
-            f"Осталось: <b>{left:,}</b> символов",
+            f"Осталось: <b>{left:,}</b> символов{groq_limit_text}",
             parse_mode="HTML"
         )
     except Exception as e:
@@ -266,3 +289,55 @@ async def cb_toggle_request_mode(callback: CallbackQuery):
 
     await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=new_keyboard))
     await callback.answer(f"Режим доступа по запросу {status_text}.")
+
+
+@router.message(Command("settings"))
+async def cmd_settings(message: Message):
+    uid = message.from_user.id
+    if not is_allowed(uid):
+        await message.answer("🔒 Нет доступа.")
+        return
+
+    settings = get_user_settings(uid)
+    auto_speech = settings.get("auto_speech", False)
+    ai_detail = settings.get("ai_detail", "short")
+
+    btn_speech = InlineKeyboardButton(
+        text="🔊 Автоозвучка: " + ("ВКЛ" if auto_speech else "ВЫКЛ"),
+        callback_data="settings:toggle_speech"
+    )
+    btn_ai = InlineKeyboardButton(
+        text="🤖 AI детали: " + ("Кратко" if ai_detail == "short" else "Подробно"),
+        callback_data="settings:toggle_ai"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn_speech], [btn_ai]])
+    await message.answer("⚙️ <b>Настройки:</b>", reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("settings:"))
+async def cb_settings(callback: CallbackQuery):
+    uid = callback.from_user.id
+    action = callback.data.split(":")[1]
+
+    if action == "toggle_speech":
+        toggle_auto_speech(uid)
+    elif action == "toggle_ai":
+        toggle_ai_detail(uid)
+
+    settings = get_user_settings(uid)
+    auto_speech = settings.get("auto_speech", False)
+    ai_detail = settings.get("ai_detail", "short")
+
+    btn_speech = InlineKeyboardButton(
+        text="🔊 Автоозвучка: " + ("ВКЛ" if auto_speech else "ВЫКЛ"),
+        callback_data="settings:toggle_speech"
+    )
+    btn_ai = InlineKeyboardButton(
+        text="🤖 AI детали: " + ("Кратко" if ai_detail == "short" else "Подробно"),
+        callback_data="settings:toggle_ai"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[btn_speech], [btn_ai]])
+    await callback.message.edit_reply_markup(reply_markup=kb)
+    await callback.answer()

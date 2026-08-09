@@ -1,20 +1,9 @@
-# ─── Часть 2: Команда /lang ───────────────────────────────────────────────────
-#
-# Шаг 1: пользователь выбирает исходный язык (с какого переводить)
-# Шаг 2: пользователь выбирает языки-назначения (на какой, можно несколько)
-# Кнопки с галочками ✅ / без. Кнопка "Сохранить" завершает настройку.
-#
-# Состояния FSM:
-#   LangSetup.source  — ждём выбора исходного языка
-#   LangSetup.targets — ждём выбора языков-назначений
-
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-# Импорт из Части 1
 from bot_part1 import (
     LANGUAGES, get_label,
     get_user_settings, set_source_lang, toggle_target_lang
@@ -22,21 +11,23 @@ from bot_part1 import (
 
 router = Router()
 
-
-# ─── FSM-состояния ────────────────────────────────────────────────────────────
-
 class LangSetup(StatesGroup):
-    source  = State()   # выбор исходного языка
-    targets = State()   # выбор языков-назначений
+    source  = State()
+    targets = State()
 
+PAGE_SIZE = 30
 
-# ─── Клавиатуры ───────────────────────────────────────────────────────────────
+def get_sorted_codes():
+    return sorted(LANGUAGES.keys(), key=lambda k: LANGUAGES[k][2])
 
-def kb_source(current_source: str | None) -> InlineKeyboardMarkup:
-    """Клавиатура выбора исходного языка. Галочка на текущем."""
+def kb_source(current_source, page: int = 0) -> InlineKeyboardMarkup:
+    codes = get_sorted_codes()
+    total_pages = (len(codes) + PAGE_SIZE - 1) // PAGE_SIZE
+    page_codes = codes[page*PAGE_SIZE : (page+1)*PAGE_SIZE]
+
     buttons = []
     row = []
-    for code in LANGUAGES:
+    for code in page_codes:
         label = get_label(code)
         if code == current_source:
             label = "✅ " + label
@@ -46,14 +37,26 @@ def kb_source(current_source: str | None) -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"src_page:{page-1}"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"src_page:{page+1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([InlineKeyboardButton(text="💾 Сохранить", callback_data="src:save")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
+def kb_targets(current_targets: list, page: int = 0) -> InlineKeyboardMarkup:
+    codes = get_sorted_codes()
+    total_pages = (len(codes) + PAGE_SIZE - 1) // PAGE_SIZE
+    page_codes = codes[page*PAGE_SIZE : (page+1)*PAGE_SIZE]
 
-def kb_targets(current_targets: list) -> InlineKeyboardMarkup:
-    """Клавиатура выбора языков-назначений. Галочки на выбранных."""
     buttons = []
     row = []
-    for code in LANGUAGES:
+    for code in page_codes:
         label = get_label(code)
         if code in current_targets:
             label = "✅ " + label
@@ -63,63 +66,90 @@ def kb_targets(current_targets: list) -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
-    # Кнопка "Сохранить"
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(text="⬅️", callback_data=f"tgt_page:{page-1}"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(text="➡️", callback_data=f"tgt_page:{page+1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
     buttons.append([InlineKeyboardButton(text="💾 Сохранить", callback_data="tgt:save")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-# ─── Хэндлеры ─────────────────────────────────────────────────────────────────
-
 @router.message(Command("lang"))
 async def cmd_lang(message: Message, state: FSMContext):
-    """Запускает настройку языков — Шаг 1: выбор исходного"""
     uid = message.from_user.id
     settings = get_user_settings(uid)
     current_source = settings.get("source")
-
     await state.set_state(LangSetup.source)
+    await state.update_data(src_page=0)
     await message.answer(
         "Шаг 1 из 2 — выбери <b>исходный язык</b> (с какого переводить):",
-        reply_markup=kb_source(current_source),
+        reply_markup=kb_source(current_source, 0),
         parse_mode="HTML"
     )
 
-
-@router.callback_query(LangSetup.source, F.data.startswith("src:"))
-async def cb_source_selected(call: CallbackQuery, state: FSMContext):
-    """Пользователь выбрал исходный язык — переходим к шагу 2"""
-    code = call.data.split(":", 1)[1]
+@router.callback_query(LangSetup.source, F.data.startswith("src_page:"))
+async def cb_src_page(call: CallbackQuery, state: FSMContext):
+    page = int(call.data.split(":")[1])
     uid = call.from_user.id
-
-    set_source_lang(uid, code)
-    await state.update_data(source=code)
-
     settings = get_user_settings(uid)
-    current_targets = settings.get("targets", [])
-
-    await state.set_state(LangSetup.targets)
-    await call.message.edit_text(
-        f"Исходный: {get_label(code)}\n\n"
-        "Шаг 2 из 2 — выбери <b>языки для перевода</b> (можно несколько):",
-        reply_markup=kb_targets(current_targets),
-        parse_mode="HTML"
-    )
+    await state.update_data(src_page=page)
+    await call.message.edit_reply_markup(reply_markup=kb_source(settings.get("source"), page))
     await call.answer()
 
-
-@router.callback_query(LangSetup.targets, F.data.startswith("tgt:"))
-async def cb_target_toggled(call: CallbackQuery, state: FSMContext):
-    """Пользователь тыкает по языкам-назначениям"""
-    action = call.data.split(":", 1)[1]
+@router.callback_query(LangSetup.source, F.data.startswith("src:"))
+async def cb_source_action(call: CallbackQuery, state: FSMContext):
+    action = call.data.split(":")[1]
     uid = call.from_user.id
     settings = get_user_settings(uid)
+    data = await state.get_data()
+    page = data.get("src_page", 0)
+
+    if action == "save":
+        if not settings.get("source"):
+            await call.answer("Выбери исходный язык!", show_alert=True)
+            return
+        await state.set_state(LangSetup.targets)
+        await state.update_data(tgt_page=0)
+        src_label = get_label(settings.get("source"))
+        await call.message.edit_text(
+            f"Исходный: {src_label}\n\n"
+            "Шаг 2 из 2 — выбери <b>языки для перевода</b> (можно несколько):",
+            reply_markup=kb_targets(settings.get("targets", []), 0),
+            parse_mode="HTML"
+        )
+        await call.answer()
+    else:
+        set_source_lang(uid, action)
+        await call.message.edit_reply_markup(reply_markup=kb_source(action, page))
+        await call.answer()
+
+@router.callback_query(LangSetup.targets, F.data.startswith("tgt_page:"))
+async def cb_tgt_page(call: CallbackQuery, state: FSMContext):
+    page = int(call.data.split(":")[1])
+    uid = call.from_user.id
+    settings = get_user_settings(uid)
+    await state.update_data(tgt_page=page)
+    await call.message.edit_reply_markup(reply_markup=kb_targets(settings.get("targets", []), page))
+    await call.answer()
+
+@router.callback_query(LangSetup.targets, F.data.startswith("tgt:"))
+async def cb_target_action(call: CallbackQuery, state: FSMContext):
+    action = call.data.split(":")[1]
+    uid = call.from_user.id
+    settings = get_user_settings(uid)
+    data = await state.get_data()
+    page = data.get("tgt_page", 0)
 
     if action == "save":
         targets = settings.get("targets", [])
         source = settings.get("source")
-
         if not targets:
-            await call.answer("Кря! Выбери хотя бы один язык 🦆", show_alert=True)
+            await call.answer("Выбери хотя бы один язык!", show_alert=True)
             return
 
         src_label = get_label(source)
@@ -132,19 +162,8 @@ async def cb_target_toggled(call: CallbackQuery, state: FSMContext):
             parse_mode="HTML"
         )
         await state.clear()
-
     else:
-        # Переключаем галочку
         toggle_target_lang(uid, action)
-        current_targets = settings.get("targets", [])
-        data = await state.get_data()
-        source = data.get("source") or settings.get("source")
-
-        await call.message.edit_text(
-            f"Исходный: {get_label(source)}\n\n"
-            "Шаг 2 из 2 — выбери <b>языки для перевода</b> (можно несколько):",
-            reply_markup=kb_targets(current_targets),
-            parse_mode="HTML"
-        )
-
+        updated_targets = get_user_settings(uid).get("targets", [])
+        await call.message.edit_reply_markup(reply_markup=kb_targets(updated_targets, page))
     await call.answer()

@@ -1,1 +1,1 @@
-{"48667862": {"source": "RU", "targets": ["EN", "BS", "JA", "TR", "UK"]}, "1447443197": {"source": "RU", "targets": ["EN", "DE"]}, "7566906445": {"source": "LT", "targets": ["RU"]}, "8339673602": {"source": "PT", "targets": ["NL"]}}
+{"48667862": {"source": "RU", "targets": ["EN", "JA", "BS"], "auto_speech": false, "ai_detail": "short"}, "1447443197": {"source": "RU", "targets": ["EN", "DE"]}, "7566906445": {"source": "LT", "targets": ["RU"]}, "8339673602": {"source": "PT", "targets": ["NL"]}}

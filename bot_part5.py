@@ -60,6 +60,7 @@ async def ai_explain_word(
     source_lang: str,
     target_lang: str,
     deepl_translation: str,
+    detail: str = "short"
 ) -> str:
     """
     Запрашивает у Groq llama-3.3-70b лингвистический разбор слова/фразы.
@@ -68,15 +69,39 @@ async def ai_explain_word(
     src_name = lang_name(source_lang)
     tgt_name = lang_name(target_lang)
 
-    system_prompt = (
-        "Ты лингвистический помощник. Дай краткий разбор слова/фразы строго по шаблону. "
-        "Используй HTML-теги <b> для жирного текста. "
-        "Ответ всегда на РУССКОМ языке. "
-        "Никаких эмодзи кроме 🌍 в первой строке. "
-        "Никаких примеров, никаких похожих слов. Только: Язык, Перевод, Транскрипция, Нюанс."
-    )
+    if detail == "full":
+        system_prompt = (
+            "Ты лингвистический помощник. Дай подробный разбор слова/фразы строго по шаблону. "
+            "Используй HTML-теги <b> для жирного текста. "
+            "Ответ всегда на РУССКОМ языке. "
+            "Никаких эмодзи кроме тех что в шаблоне."
+        )
 
-    user_prompt = f"""Разбери слово/фразу: "{text}"
+        user_prompt = f"""Разбери слово/фразу: "{text}"
+Исходный язык: {src_name}
+Язык перевода: {tgt_name}
+Перевод DeepL: "{deepl_translation}"
+
+Дай в таком формате:
+
+🌍 <b>Язык:</b> <название языка оригинала>
+📖 <b>Перевод:</b> <точный перевод с нюансами>
+🔤 <b>Транскрипция:</b> <транскрипция МФА или произношение, если применимо>
+💡 <b>Нюанс:</b> <культурный или лингвистический контекст, этимология, 2-4 предложения>
+📝 <b>Примеры:</b>
+  • "<пример 1 на исходном языке>" — <перевод>
+  • "<пример 2 на исходном языке>" — <перевод>
+🔗 <b>Похожие:</b> <слова-аналоги в других языках, если есть>"""
+    else:
+        system_prompt = (
+            "Ты лингвистический помощник. Дай краткий разбор слова/фразы строго по шаблону. "
+            "Используй HTML-теги <b> для жирного текста. "
+            "Ответ всегда на РУССКОМ языке. "
+            "Никаких эмодзи кроме 🌍 в первой строке. "
+            "Никаких примеров, никаких похожих слов. Только: Язык, Перевод, Транскрипция, Нюанс."
+        )
+
+        user_prompt = f"""Разбери слово/фразу: "{text}"
 Исходный язык: {src_name}
 Язык перевода: {tgt_name}
 Перевод DeepL: "{deepl_translation}"
@@ -220,11 +245,16 @@ async def cb_ai_explain(callback: CallbackQuery):
     await callback.answer("🤖 Думаю...")
 
     try:
+        uid = callback.from_user.id
+        settings = get_user_settings(uid)
+        ai_detail = settings.get("ai_detail", "short")
+        
         explanation = await ai_explain_word(
             text=original_text,
             source_lang=source,
             target_lang=target,
             deepl_translation=deepl_translated or "",
+            detail=ai_detail
         )
         header = f"🤖 <b>Groq AI:</b> <i>{original_text}</i>\n\n"
         await callback.message.answer(header + explanation, parse_mode="HTML")
