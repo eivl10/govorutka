@@ -1,7 +1,7 @@
 # ─── Часть 5: AI-разбор слов и OCR-перевод фото ───────────────────────────────
 #
 # Фича 1: Кнопка [🤖 AI] после перевода → Groq llama-3.3-70b даёт лингво-разбор
-# Фича 2: Фото с текстом → Groq llama-4-scout (Vision) → OCR + перевод
+# Фича 2: Фото с текстом → Groq qwen/qwen3.6-27b (Vision) → OCR + перевод
 # Fallback для Vision: Google Gemini Flash Lite (если задан GOOGLE_API_KEY)
 #
 # Новые переменные .env:
@@ -38,10 +38,10 @@ GROQ_API_KEY: str | None = None
 GOOGLE_API_KEY: str | None = None
 
 AI_MODEL_TEXT   = "llama-3.3-70b-versatile"
-AI_MODEL_VISION = "meta-llama/llama-4-scout-17b-16e-instruct"
+AI_MODEL_VISION = "qwen/qwen3.6-27b"
 
 GROQ_CHAT_URL  = "https://api.groq.com/openai/v1/chat/completions"
-GEMINI_URL     = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
+GEMINI_URL     = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 AI_EXPLAIN_ENABLED = os.environ.get("AI_EXPLAIN_ENABLED", "true").lower() == "true"
 AI_PHOTO_ENABLED   = os.environ.get("AI_PHOTO_ENABLED", "true").lower() == "true"
@@ -168,7 +168,7 @@ TRANSLATED: <перевод>
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
             ],
         }],
-        "max_tokens": 800,
+        "max_tokens": 1500,
         "temperature": 0.2,
     }
 
@@ -213,8 +213,12 @@ TRANSLATED: <перевод>"""
 
 def _parse_vision_response(text: str) -> dict:
     """Парсит ORIGINAL/LANG/TRANSLATED из ответа LLM."""
+    if "</think>" in text:
+        text = text.split("</think>")[-1].strip()
+
     result = {"original": "", "lang": "", "translated": ""}
     for line in text.splitlines():
+        line = line.strip()
         if line.startswith("ORIGINAL:"):
             result["original"] = line[len("ORIGINAL:"):].strip()
         elif line.startswith("LANG:"):
