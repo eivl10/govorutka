@@ -21,7 +21,7 @@ async def main():
     dp = Dispatcher()
     dp.include_router(handlers.router)
 
-    print("Бот запущен", flush=True)
+    print("Кря! Бот запущен 🦆", flush=True)
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 

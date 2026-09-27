@@ -126,7 +126,11 @@ def kb_picker(pid: str) -> InlineKeyboardMarkup:
 # ─── Вспомогательное: перевести и отправить одним сообщением ─────────────────
 
 async def _translate_and_send(bot: Bot, chat_id: int, text: str, source: str, target: str):
-    translated = await translate_text(text, source, target)
+    try:
+        translated = await translate_text(text, source, target)
+    except Exception as e:
+        await bot.send_message(chat_id, f"❌ Ошибка перевода: {e}")
+        return
     th = cache_text(translated, target)
     await bot.send_message(
         chat_id,
@@ -148,7 +152,7 @@ async def on_text(message: Message, bot: Bot):
     try:
         audio = await synthesize_speech(text, detected)
     except Exception as e:
-        await message.answer(f"⚠️ Не смог озвучить: {e}")
+        await message.answer(f"❌ Ошибка TTS: {e}")
         return
 
     audio_file = BufferedInputFile(audio, filename="speech.mp3")
@@ -166,17 +170,17 @@ async def on_voice(message: Message, bot: Bot):
         file_bytes_io = await bot.download_file(file.file_path)
         file_bytes = file_bytes_io.read()
     except Exception as e:
-        await message.answer(f"⚠️ Не смог скачать аудио: {e}")
+        await message.answer(f"❌ Не смог скачать аудио: {e}")
         return
 
     try:
         text = await transcribe_voice(file_bytes)
     except Exception as e:
-        await message.answer(f"⚠️ Ошибка распознавания: {e}")
+        await message.answer(f"❌ Ошибка транскрибации: {e}")
         return
 
     if not text.strip():
-        await message.answer("⚠️ Не удалось распознать речь.")
+        await message.answer("❌ Не удалось распознать речь.")
         return
 
     detected = await detect_source_lang(text)
@@ -191,16 +195,16 @@ async def cb_speak(callback: CallbackQuery, bot: Bot):
     _, h = callback.data.split("|", 1)
     entry = get_cached(h)
     if not entry:
-        await callback.answer("Устарело. Отправь заново.", show_alert=True)
+        await callback.answer("Текст устарел. Отправь заново.", show_alert=True)
         return
 
     text, lang = entry
-    await callback.answer("🔊")
+    await callback.answer("🔊 Говорю...")
 
     try:
         audio = await synthesize_speech(text, lang)
     except Exception as e:
-        await callback.message.answer(f"⚠️ Не смог озвучить: {e}")
+        await callback.message.answer(f"❌ Ошибка TTS: {e}")
         return
 
     audio_file = BufferedInputFile(audio, filename="speech.mp3")
@@ -213,7 +217,7 @@ async def cb_speak(callback: CallbackQuery, bot: Bot):
 async def cb_translate_open(callback: CallbackQuery):
     _, h = callback.data.split("|", 1)
     if not get_cached(h):
-        await callback.answer("Устарело. Отправь заново.", show_alert=True)
+        await callback.answer("Текст устарел. Отправь заново.", show_alert=True)
         return
 
     pid = new_picker(h, callback.message.reply_markup)
@@ -228,7 +232,7 @@ async def cb_picker(callback: CallbackQuery, bot: Bot):
     _, pid, action, *rest = callback.data.split("|")
     state = _pickers.get(pid)
     if not state:
-        await callback.answer("Устарело. Нажми 🌐 заново.", show_alert=True)
+        await callback.answer("Текст устарел. Отправь заново.", show_alert=True)
         return
 
     if action == "pg":
@@ -253,7 +257,7 @@ async def cb_picker(callback: CallbackQuery, bot: Bot):
 
     entry = get_cached(state["text_hash"])
     if not entry:
-        await callback.answer("Устарело. Отправь заново.", show_alert=True)
+        await callback.answer("Текст устарел. Отправь заново.", show_alert=True)
         _pickers.pop(pid, None)
         return
     text, source = entry
@@ -269,7 +273,7 @@ async def cb_picker(callback: CallbackQuery, bot: Bot):
             await callback.answer()
             return
 
-        await callback.answer("🌐")
+        await callback.answer()
         await _translate_and_send(bot, callback.message.chat.id, text, source, code)
         await callback.message.edit_reply_markup(reply_markup=state["origin_markup"])
         _pickers.pop(pid, None)
@@ -277,9 +281,9 @@ async def cb_picker(callback: CallbackQuery, bot: Bot):
 
     if action == "ok":
         if not state["selected"]:
-            await callback.answer("Выбери хотя бы один язык.", show_alert=True)
+            await callback.answer("Выбери хотя бы один язык!", show_alert=True)
             return
-        await callback.answer("🌐")
+        await callback.answer()
         for code in list(state["selected"]):
             await _translate_and_send(bot, callback.message.chat.id, text, source, code)
         await callback.message.edit_reply_markup(reply_markup=state["origin_markup"])
@@ -292,8 +296,11 @@ async def cb_picker(callback: CallbackQuery, bot: Bot):
 @router.message(Command("start"))
 async def cmd_start(message: Message):
     await message.answer(
-        "Пришли текст — озвучу.\n"
-        "Пришли голосовое — расшифрую.\n"
-        "🌐 — перевести (🔘/☑️ — один или сразу несколько языков).\n"
-        "🔊 — озвучить."
+        "<b>Кря! Кря на любом языке 🦆</b>\n\n"
+        "Крякни мне текст — сразу озвучу.\n"
+        "Крякни голосовое — расшифрую.\n\n"
+        "🌐 — перевести (🔘 один язык, ☑️ — сразу несколько)\n"
+        "🔊 — озвучить\n\n"
+        "Кря! 🦆",
+        parse_mode="HTML",
     )
