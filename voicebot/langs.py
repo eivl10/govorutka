@@ -167,6 +167,19 @@ def get_flag(code: str) -> str:
     return entry[1] if entry else "🏳️"
 
 
+def get_name(code: str) -> str:
+    entry = LANGUAGES.get(code)
+    return entry[2] if entry else code
+
+
+def get_label(code: str) -> str:
+    """Строка вида '🇬🇧 Английский' для кнопки выбора языка."""
+    entry = LANGUAGES.get(code)
+    if not entry:
+        return f"❓ {code}"
+    return f"{entry[1]} {entry[2]}"
+
+
 def get_google_code(code: str) -> str:
     return LANGUAGES[code][0]
 

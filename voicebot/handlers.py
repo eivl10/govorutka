@@ -17,13 +17,13 @@ from aiogram.types import (
     BufferedInputFile,
 )
 
-from langs import sorted_codes, get_flag
+from langs import sorted_codes, get_flag, get_label
 from services import translate_text, detect_source_lang, transcribe_voice, synthesize_speech
 
 router = Router()
 
-PAGE_SIZE = 30       # 6 в ряд × 5 рядов
-PER_ROW = 6
+PAGE_SIZE = 30       # 2 в ряд × 15 рядов (как в утке)
+PER_ROW = 2
 
 # ─── Кеш текстов: hash → (text, lang) ─────────────────────────────────────────
 
@@ -94,9 +94,9 @@ def kb_picker(pid: str) -> InlineKeyboardMarkup:
     buttons = []
     row = []
     for code in page_codes:
-        label = get_flag(code)
+        label = get_label(code)
         if state["multi"] and code in state["selected"]:
-            label = "✅" + label
+            label = "✅ " + label
         row.append(InlineKeyboardButton(text=label, callback_data=f"p|{pid}|lg|{code}"))
         if len(row) == PER_ROW:
             buttons.append(row)
