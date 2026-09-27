@@ -1,0 +1,12 @@
+services:
+  utka:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      USERS_FILE: /app/data/users.json
+      LANGS_FILE: /app/data/langs.json
+      STATS_FILE: /app/data/stats.json
+    volumes:
+      - ./data:/app/data

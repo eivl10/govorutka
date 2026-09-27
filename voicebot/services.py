@@ -8,7 +8,7 @@ import io
 
 import deepl
 import httpx
-from langdetect import detect as langdetect_detect
+from langdetect import DetectorFactory, detect_langs
 
 from langs import (
     LANGUAGES, GOOGLE_TTS_LANGS, LANGDETECT_TO_DEEPL,
@@ -19,26 +19,47 @@ from langs import (
 deepl_translator: "deepl.Translator | None" = None
 GROQ_API_KEY: str | None = None
 
+DetectorFactory.seed = 0  # детерминированный langdetect
+
+# langdetect доверяем без DeepL только на достаточно длинном тексте и с высокой уверенностью
+LANGDETECT_MIN_LEN = 20
+LANGDETECT_MIN_PROB = 0.95
+# Для детекта через DeepL хватает начала текста — остальное зря съедает лимит символов
+DETECT_SAMPLE_LEN = 200
+
+
+def _langdetect(text: str, min_prob: float = 0.0) -> str | None:
+    try:
+        best = detect_langs(text)[0]
+        if best.prob < min_prob:
+            return None
+        return LANGDETECT_TO_DEEPL.get(best.lang)
+    except Exception:
+        return None
+
 
 async def translate_text(text: str, source: str, target: str) -> str:
     """Перевод через DeepL."""
     target_code = get_deepl_target(target)
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: deepl_translator.translate_text(text, source_lang=source, target_lang=target_code),
+    result = await asyncio.to_thread(
+        deepl_translator.translate_text, text, source_lang=source, target_lang=target_code
     )
     return result.text
 
 
 async def detect_source_lang(text: str) -> str:
     """Определяет язык текста, возвращает DeepL-код (по умолчанию EN)."""
-    # 1. DeepL умеет вернуть detected_source_lang при любом переводе
+    # 1. Уверенный langdetect — бесплатно и офлайн
+    if len(text) >= LANGDETECT_MIN_LEN:
+        mapped = _langdetect(text, min_prob=LANGDETECT_MIN_PROB)
+        if mapped:
+            return mapped
+
+    # 2. DeepL умеет вернуть detected_source_lang при любом переводе — шлём только начало
     if deepl_translator is not None:
         try:
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None, lambda: deepl_translator.translate_text(text, target_lang="EN-US")
+            result = await asyncio.to_thread(
+                deepl_translator.translate_text, text[:DETECT_SAMPLE_LEN], target_lang="EN-US"
             )
             detected = normalize_deepl_code(result.detected_source_lang)
             if detected:
@@ -46,16 +67,12 @@ async def detect_source_lang(text: str) -> str:
         except Exception:
             pass
 
-    # 2. Офлайн-фолбэк — langdetect
-    try:
-        code = langdetect_detect(text)
-        mapped = LANGDETECT_TO_DEEPL.get(code)
-        if mapped:
-            return mapped
-    except Exception:
-        pass
+    # 3. langdetect без порога уверенности
+    mapped = _langdetect(text)
+    if mapped:
+        return mapped
 
-    # 3. Последний резерв — неофициальный Google Translate API
+    # 4. Последний резерв — неофициальный Google Translate API
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {"client": "gtx", "sl": "auto", "tl": "en", "dt": ["t", "ld"], "q": text}
@@ -99,5 +116,4 @@ async def synthesize_speech(text: str, lang_code: str) -> bytes:
         buf.seek(0)
         return buf.read()
 
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _synth)
+    return await asyncio.to_thread(_synth)

@@ -7,6 +7,7 @@
 # Перевод на каждый выбранный язык приходит отдельным сообщением со своей 🔊.
 
 import hashlib
+import os
 import secrets
 
 from aiogram import Router, F, Bot
@@ -21,6 +22,34 @@ from langs import sorted_codes, get_flag, get_label
 from services import translate_text, detect_source_lang, transcribe_voice, synthesize_speech
 
 router = Router()
+
+# ─── Доступ и лимиты (из окружения) ───────────────────────────────────────────
+# ALLOWED_USERS — ID через запятую; пусто = бот открыт для всех.
+ALLOWED_USERS = {
+    int(x) for x in os.environ.get("ALLOWED_USERS", "").replace(" ", "").split(",") if x
+}
+MAX_TEXT_LEN = int(os.environ.get("MAX_TEXT_LEN", "1000"))
+MAX_VOICE_SEC = int(os.environ.get("MAX_VOICE_SEC", "300"))
+
+
+def _is_allowed(user) -> bool:
+    return not ALLOWED_USERS or (user is not None and user.id in ALLOWED_USERS)
+
+
+@router.message.outer_middleware()
+async def _message_access(handler, event: Message, data):
+    if not _is_allowed(event.from_user):
+        await event.answer("🔒 Кря! Этот бот не для тебя.")
+        return None
+    return await handler(event, data)
+
+
+@router.callback_query.outer_middleware()
+async def _callback_access(handler, event: CallbackQuery, data):
+    if not _is_allowed(event.from_user):
+        await event.answer("🔒 Нет доступа.", show_alert=True)
+        return None
+    return await handler(event, data)
 
 PAGE_SIZE = 30       # 2 в ряд × 15 рядов (как в утке)
 PER_ROW = 2
@@ -144,6 +173,9 @@ async def _translate_and_send(bot: Bot, chat_id: int, text: str, source: str, ta
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(message: Message, bot: Bot):
     text = message.text
+    if len(text) > MAX_TEXT_LEN:
+        await message.answer(f"❌ Слишком длинно, кря! Максимум {MAX_TEXT_LEN} символов.")
+        return
     await bot.send_chat_action(message.chat.id, "record_voice")
 
     detected = await detect_source_lang(text)
@@ -163,6 +195,9 @@ async def on_text(message: Message, bot: Bot):
 
 @router.message(F.voice)
 async def on_voice(message: Message, bot: Bot):
+    if message.voice.duration > MAX_VOICE_SEC:
+        await message.answer(f"❌ Слишком длинно, кря! Максимум {MAX_VOICE_SEC} сек.")
+        return
     await bot.send_chat_action(message.chat.id, "typing")
 
     try:

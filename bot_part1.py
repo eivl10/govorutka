@@ -52,13 +52,21 @@ def approve_user_auto(user_id: int):
     save_users(data)
 
 
-def save_users(data: dict):
-    with open(USERS_FILE, "w") as f:
+def _write_json(path: str, data) -> None:
+    """Атомарная запись: пишем во временный файл и подменяем, чтобы падение
+    посреди записи не оставило битый JSON."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def save_users(data: dict):
+    _write_json(USERS_FILE, data)
 
 
 def is_allowed(user_id: int) -> bool:
-    if user_id == ADMIN_ID or user_id == 48667862:
+    if user_id == ADMIN_ID:
         return True
     data = load_users()
     if not data.get("request_access_enabled", True):
@@ -304,8 +312,7 @@ def _load_langs() -> dict:
     return {}
 
 def _save_langs():
-    with open(LANGS_FILE, "w") as f:
-        json.dump(user_lang_settings, f)
+    _write_json(LANGS_FILE, user_lang_settings)
 
 # Загружаем при старте
 user_lang_settings: dict = _load_langs()
@@ -373,18 +380,7 @@ def _load_stats() -> dict:
     return {}
 
 def _save_stats(data: dict):
-    with open(STATS_FILE, "w") as f:
-        json.dump(data, f)
-
-def increment_translation_count(user_id: int, char_count: int = 0):
-    """Увеличивает счётчик переводов и символов для пользователя"""
-    data = _load_stats()
-    uid = str(user_id)
-    if uid not in data:
-        data[uid] = {"count": 0, "chars": 0}
-    data[uid]["count"] = data[uid].get("count", 0) + 1
-    data[uid]["chars"] = data[uid].get("chars", 0) + char_count
-    _save_stats(data)
+    _write_json(STATS_FILE, data)
 
 def get_translation_count(user_id: int) -> int:
     """Возвращает количество переводов пользователя"""

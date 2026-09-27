@@ -10,6 +10,7 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
+import asyncio
 import os
 import httpx
 
@@ -18,7 +19,7 @@ import bot_part3  # для доступа к deepl_translator
 from bot_part1 import (
     ADMIN_ID,
     is_allowed, is_pending, add_pending,
-    load_users, add_user,
+    load_users, add_user, update_user_info,
     get_translation_count, get_char_count,
     get_request_mode, set_request_mode,
     is_auto_approve_enabled, approve_user_auto,
@@ -36,32 +37,23 @@ async def cmd_start(message: Message):
     user = message.from_user
 
     if not is_allowed(user.id):
-        # Проверяем AUTO_APPROVE
         if is_auto_approve_enabled():
             approve_user_auto(user.id)
-            # Пропускаем дальше, показываем приветствие
+        elif is_pending(user.id):
+            await message.answer("⏳ Твоя заявка всё ещё на рассмотрении. Ожидайте.")
+            return
         else:
-            request_mode = get_request_mode()
+            add_pending(user.id, user.full_name, user.username or "")
+            await message.answer("📝 Заявка отправлена администратору. Ожидайте подтверждения.")
+            admin_msg = f"🆕 Новая заявка:\nID: {user.id}\nИмя: {user.full_name}\nЮзернейм: @{user.username}"
+            try:
+                await message.bot.send_message(ADMIN_ID, admin_msg, reply_markup=bot_part3.kb_admin_approve(user.id))
+            except Exception as e:
+                print(f"Failed to notify admin: {e}")
+            return
 
-            if not request_mode:
-                # Режим доступа по запросу выключен — пускаем всех
-                pass
-            else:
-                # Режим включён — проверяем статус пользователя
-                if is_pending(user.id):
-                    await message.answer("⏳ Твоя заявка всё ещё на рассмотрении. Ожидайте.")
-                    return
-                else:
-                    from bot_part1 import add_pending
-                    from bot_part2 import kb_admin_approve
-                    add_pending(user.id, user.full_name, user.username)
-                    await message.answer("📝 Заявка отправлена администратору. Ожидайте подтверждения.")
-                    admin_msg = f"🆕 Новая заявка:\nID: {user.id}\nИмя: {user.full_name}\nЮзернейм: @{user.username}"
-                    try:
-                        await message.bot.send_message(ADMIN_ID, admin_msg, reply_markup=kb_admin_approve(user.id))
-                    except Exception as e:
-                        print(f"Failed to notify admin: {e}")
-                    return
+    # Подтягиваем имя/юзернейм для добавленных через /adduser
+    update_user_info(user.id, user.full_name, user.username or "")
 
     await message.answer(
         "<b>Кря! Кря кря кря на любой язык 🦆</b>\n\n"
@@ -111,7 +103,7 @@ async def cmd_rest(message: Message):
         return
 
     try:
-        usage = bot_part3.deepl_translator.get_usage()
+        usage = await asyncio.to_thread(bot_part3.deepl_translator.get_usage)
         used = usage.character.count
         limit = usage.character.limit
         left = limit - used
@@ -162,7 +154,7 @@ async def cmd_users(message: Message):
     deepl_limit = None
     if bot_part3.deepl_translator is not None:
         try:
-            usage = bot_part3.deepl_translator.get_usage()
+            usage = await asyncio.to_thread(bot_part3.deepl_translator.get_usage)
             deepl_limit = usage.character.limit
         except Exception:
             pass
@@ -318,6 +310,9 @@ async def cmd_settings(message: Message):
 @router.callback_query(F.data.startswith("settings:"))
 async def cb_settings(callback: CallbackQuery):
     uid = callback.from_user.id
+    if not is_allowed(uid):
+        await callback.answer("🔒 Нет доступа.", show_alert=True)
+        return
     action = callback.data.split(":")[1]
 
     if action == "toggle_speech":

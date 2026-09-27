@@ -9,27 +9,23 @@
 #   AI_EXPLAIN_ENABLED — true/false (default: true)
 #   AI_PHOTO_ENABLED   — true/false (default: true)
 
-import io
 import os
-import json
+import html
 import base64
 import httpx
 
-from aiogram import Router, F, Bot
+from aiogram import Router, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    BufferedInputFile,
 )
-from aiogram.fsm.context import FSMContext
 
 from bot_part1 import (
     LANGUAGES,
-    is_allowed, is_auto_approve_enabled, approve_user_auto,
-    is_pending, add_pending,
     get_user_settings, is_lang_configured,
 )
-from bot_part3 import get_cached_text, cache_text, synthesize_speech
+from bot_part3 import get_cached_text, cache_text, ensure_access, check_callback_access
 
 router = Router()
 
@@ -48,6 +44,13 @@ AI_PHOTO_ENABLED   = os.environ.get("AI_PHOTO_ENABLED", "true").lower() == "true
 
 
 # ─── Вспомогательные функции ─────────────────────────────────────────────────
+
+def describe_error(e: Exception) -> str:
+    """Короткое описание ошибки для пользователя — без URL и прочих деталей запроса."""
+    if isinstance(e, httpx.HTTPStatusError):
+        return f"HTTP {e.response.status_code}"
+    return type(e).__name__
+
 
 def lang_name(code: str) -> str:
     """DeepL-код → название языка на русском."""
@@ -207,9 +210,10 @@ If no text found, reply: ORIGINAL: [no text]"""
         }]
     }
 
-    url = f"{GEMINI_URL}?key={GOOGLE_API_KEY}"
+    # Ключ — в заголовке, а не в URL: URL попадает в текст исключений и логи
+    headers = {"x-goog-api-key": GOOGLE_API_KEY}
     async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(url, json=payload)
+        resp = await client.post(GEMINI_URL, headers=headers, json=payload)
         resp.raise_for_status()
 
     content = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -217,20 +221,24 @@ If no text found, reply: ORIGINAL: [no text]"""
 
 
 def _parse_vision_response(text: str) -> dict:
-    """Парсит ORIGINAL/LANG/TRANSLATED из ответа LLM."""
+    """Парсит ORIGINAL/LANG/TRANSLATED из ответа LLM.
+    Значение секции может занимать несколько строк — до следующего маркера."""
     if "</think>" in text:
         text = text.split("</think>")[-1].strip()
 
-    result = {"original": "", "lang": "", "translated": ""}
+    markers = {"ORIGINAL:": "original", "LANG:": "lang", "TRANSLATED:": "translated"}
+    sections = {"original": [], "lang": [], "translated": []}
+    current = None
     for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("ORIGINAL:"):
-            result["original"] = line[len("ORIGINAL:"):].strip()
-        elif line.startswith("LANG:"):
-            result["lang"] = line[len("LANG:"):].strip()
-        elif line.startswith("TRANSLATED:"):
-            result["translated"] = line[len("TRANSLATED:"):].strip()
-    return result
+        stripped = line.strip()
+        for marker, key in markers.items():
+            if stripped.startswith(marker):
+                current = key
+                line = stripped[len(marker):]
+                break
+        if current is not None:
+            sections[current].append(line)
+    return {key: "\n".join(lines).strip() for key, lines in sections.items()}
 
 
 # ─── Хэндлер: кнопка 🤖 AI (разбор слова) ───────────────────────────────────
@@ -238,6 +246,8 @@ def _parse_vision_response(text: str) -> dict:
 @router.callback_query(F.data.startswith("ai_explain|"))
 async def cb_ai_explain(callback: CallbackQuery):
     """Нажали кнопку 🤖 AI — запрашиваем у Groq разбор слова."""
+    if not await check_callback_access(callback):
+        return
     if not AI_EXPLAIN_ENABLED:
         await callback.answer("AI временно отключён.", show_alert=True)
         return
@@ -265,34 +275,31 @@ async def cb_ai_explain(callback: CallbackQuery):
             deepl_translation=deepl_translated or "",
             detail=ai_detail
         )
-        header = f"🤖 <b>Groq AI:</b> <i>{original_text}</i>\n\n"
-        await callback.message.answer(header + explanation, parse_mode="HTML")
+        header = f"🤖 <b>Groq AI:</b> <i>{html.escape(original_text)}</i>\n\n"
+        try:
+            await callback.message.answer(header + explanation, parse_mode="HTML")
+        except TelegramBadRequest:
+            # Модель вернула невалидный HTML — отправляем как есть, без разметки
+            await callback.message.answer(f"🤖 Groq AI: {original_text}\n\n{explanation}")
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 429:
             await callback.message.answer("⚠️ Лимит Groq исчерпан. Попробуй через минуту.")
         else:
             await callback.message.answer(f"❌ Ошибка AI: {e.response.status_code}")
     except Exception as e:
-        await callback.message.answer(f"❌ Ошибка AI: {e}")
+        print(f"AI explain failed: {e!r}", flush=True)
+        await callback.message.answer(f"❌ Ошибка AI: {describe_error(e)}")
 
 
 # ─── Хэндлер: фото → OCR → перевод ──────────────────────────────────────────
 
 @router.message(F.photo)
-async def on_photo(message: Message, state: FSMContext):
+async def on_photo(message: Message):
     """Пользователь прислал фото — извлекаем текст и переводим."""
     uid = message.from_user.id
 
-    if not is_allowed(uid):
-        if is_auto_approve_enabled():
-            approve_user_auto(uid)
-        elif is_pending(uid):
-            await message.answer("✅ Заявку кря. Погоди немного.")
-            return
-        else:
-            add_pending(uid)
-            await message.answer("🦆 Запрос на доступ отправлен.")
-            return
+    if not await ensure_access(message):
+        return
 
     if not AI_PHOTO_ENABLED:
         await message.answer("📸 Перевод фото временно отключён.")
@@ -317,7 +324,7 @@ async def on_photo(message: Message, state: FSMContext):
         image_bytes = file_bytes.read() if hasattr(file_bytes, "read") else bytes(file_bytes)
     except Exception as e:
         await status_msg.delete()
-        await message.answer(f"❌ Не удалось загрузить фото: {e}")
+        await message.answer(f"❌ Не удалось загрузить фото: {describe_error(e)}")
         return
 
     # Vision: Gemini primary → Groq fallback
@@ -332,9 +339,10 @@ async def on_photo(message: Message, state: FSMContext):
                 parsed = await ai_translate_image_groq(image_bytes, tgt_name)
                 used_model = "Groq"
             except Exception as e_groq:
+                print(f"Vision failed: gemini={e_gemini!r} groq={e_groq!r}", flush=True)
                 await status_msg.delete()
                 await message.answer(
-                    f"❌ Gemini Vision: {e_gemini}\n❌ Groq fallback: {e_groq}"
+                    f"❌ Gemini Vision: {describe_error(e_gemini)}\n❌ Groq fallback: {describe_error(e_groq)}"
                 )
                 return
     else:
@@ -342,8 +350,9 @@ async def on_photo(message: Message, state: FSMContext):
             parsed = await ai_translate_image_groq(image_bytes, tgt_name)
             used_model = "Groq"
         except Exception as e_groq:
+            print(f"Vision failed: groq={e_groq!r}", flush=True)
             await status_msg.delete()
-            await message.answer(f"❌ Ошибка Vision AI: {e_groq}")
+            await message.answer(f"❌ Ошибка Vision AI: {describe_error(e_groq)}")
             return
 
     await status_msg.delete()
@@ -368,10 +377,10 @@ async def on_photo(message: Message, state: FSMContext):
 
     reply = (
         f"📸 <b>Текст на фото:</b>\n"
-        f"<code>{original}</code>\n\n"
-        f"🌍 <b>Язык:</b> {lang_label}\n\n"
-        f"🇷🇺 <b>Перевод на {tgt_name}:</b>\n"
-        f"{translated}\n\n"
+        f"<code>{html.escape(original)}</code>\n\n"
+        f"🌍 <b>Язык:</b> {html.escape(lang_label)}\n\n"
+        f"{LANGUAGES[source][1]} <b>Перевод на {tgt_name}:</b>\n"
+        f"{html.escape(translated)}\n\n"
         f"<i>via {used_model}</i>"
     )
 

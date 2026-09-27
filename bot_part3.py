@@ -8,6 +8,8 @@
 # Голосовые: скачиваем файл → отправляем в Groq Whisper API → получаем текст → переводим.
 # Если выбран только один язык-назначение — переводим сразу, без кнопок выбора.
 
+import asyncio
+import html
 import io
 import hashlib
 import deepl
@@ -16,18 +18,18 @@ from aiogram import Router, F, Bot
 from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
+    BufferedInputFile,
 )
 from aiogram.fsm.context import FSMContext
 
 # Импорт из Части 1
 from bot_part1 import (
-    LANGUAGES, get_label, get_google_code,
+    LANGUAGES, get_label,
     get_user_settings, is_lang_configured,
     get_deepl_target,
     ADMIN_ID,
     is_allowed, is_pending, add_pending,
     approve_user, deny_user, revoke_user,
-    load_users,
     get_request_mode,
     is_auto_approve_enabled, approve_user_auto,
 )
@@ -125,11 +127,9 @@ GOOGLE_TTS_LANGS = {
 
 
 
-from aiogram.types import BufferedInputFile
-
 async def send_translation(bot_obj, chat_id, text, reply_markup, auto_speech=False, translated_text="", target_lang="en"):
-    # Отправляет текст
-    await bot_obj.send_message(chat_id, text, reply_markup=reply_markup, parse_mode="Markdown")
+    # text — готовый HTML: пользовательские части должны быть экранированы вызывающим
+    await bot_obj.send_message(chat_id, text, reply_markup=reply_markup, parse_mode="HTML")
     # Озвучивает если надо
     if auto_speech and translated_text:
         try:
@@ -144,7 +144,6 @@ async def synthesize_speech(text: str, lang_code: str) -> bytes:
     Синтез речи через gTTS (Google Text-to-Speech).
     Возвращает MP3-данные в bytes.
     """
-    import asyncio
     from gtts import gTTS
 
     tts_lang = GOOGLE_TTS_LANGS.get(lang_code, "en")
@@ -157,11 +156,48 @@ async def synthesize_speech(text: str, lang_code: str) -> bytes:
         return buf.read()
 
     # Запускаем блокирующий gTTS в отдельном потоке
-    audio_bytes = await asyncio.get_event_loop().run_in_executor(None, _synth)
-    return audio_bytes
+    return await asyncio.to_thread(_synth)
+
+
+# ─── Проверка доступа ────────────────────────────────────────────────────────
+
+async def ensure_access(message: Message) -> bool:
+    """True, если пользователь может пользоваться ботом.
+    Иначе отвечает ему сам (заявка на рассмотрении / кнопка запроса) и возвращает False."""
+    uid = message.from_user.id
+    if is_allowed(uid):
+        return True
+    if is_auto_approve_enabled():
+        approve_user_auto(uid)
+        return True
+    if is_pending(uid):
+        await message.answer("✅ Заявку кря. Погоди немного.")
+        return False
+    keyboard = [[InlineKeyboardButton(text="📨 Кря", callback_data=f"request_access|{uid}")]]
+    await message.answer(
+        "🔒 Тебя прикрякнули.\n\nОтправь кря администратору:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    return False
+
+
+async def check_callback_access(callback: CallbackQuery) -> bool:
+    """Кнопки под старыми сообщениями не должны работать после отзыва доступа."""
+    if is_allowed(callback.from_user.id):
+        return True
+    await callback.answer("🔒 Нет доступа.", show_alert=True)
+    return False
 
 
 # ─── Вспомогательные функции ─────────────────────────────────────────────────
+
+def kb_admin_approve(user_id: int) -> InlineKeyboardMarkup:
+    """Кнопки одобрения/отклонения заявки для админа."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Кря", callback_data=f"admin_approve|{user_id}"),
+        InlineKeyboardButton(text="❌ Кря", callback_data=f"admin_deny|{user_id}"),
+    ]])
+
 
 def kb_translate_targets(targets: list, text_hash: str) -> InlineKeyboardMarkup:
     """Кнопки с языками-назначениями для перевода конкретного текста."""
@@ -192,23 +228,37 @@ def kb_after_translation(source_lang: str, target_lang: str, text_hash: str, tra
     ])
 
 
-# Кеш текстов: { hash: text }
+# Кеш текстов: { hash: text }. Ограничен по размеру — самые старые вытесняются.
 _text_cache: dict[str, str] = {}
+_CACHE_MAX = 5000
 
 def cache_text(text: str) -> str:
     """Кешируем текст и возвращаем его хеш."""
     h = hashlib.md5(text.encode()).hexdigest()[:12]
+    _text_cache.pop(h, None)  # повторный текст переезжает в конец очереди
     _text_cache[h] = text
+    while len(_text_cache) > _CACHE_MAX:
+        _text_cache.pop(next(iter(_text_cache)))
     return h
 
 def get_cached_text(h: str) -> str | None:
     return _text_cache.get(h)
 
 
+def count_usage(uid: int, text: str):
+    """Учитывает перевод в статистике пользователя."""
+    if increment_translation:
+        increment_translation(uid)
+    if increment_chars:
+        increment_chars(uid, len(text))
+
+
 async def translate_deepl(text: str, source: str, target: str) -> str:
-    """Переводим через DeepL."""
+    """Переводим через DeepL (в отдельном потоке — клиент синхронный)."""
     target_code = get_deepl_target(target)
-    result = deepl_translator.translate_text(text, source_lang=source, target_lang=target_code)
+    result = await asyncio.to_thread(
+        deepl_translator.translate_text, text, source_lang=source, target_lang=target_code
+    )
     return result.text
 
 
@@ -233,17 +283,7 @@ async def translate_google(text: str, source: str, target: str) -> str:
 
 
 async def detect_language_google(text: str) -> str | None:
-    """Определяем язык текста через Google Translate. Возвращает google-код."""
-    # Метод 1: через DeepL (надёжнее всего, если translator доступен)
-    if deepl_translator is not None:
-        try:
-            result = deepl_translator.translate_text(text, target_lang="EN-US")
-            detected = result.detected_source_lang  # например "RU", "DE", "BS"
-            return detected.lower()
-        except Exception:
-            pass
-
-    # Метод 2: резервный — через неофициальный Google Translate API
+    """Определяем язык текста через неофициальный Google Translate API. Возвращает google-код."""
     try:
         url = "https://translate.googleapis.com/translate_a/single"
         params = {
@@ -284,6 +324,23 @@ def google_to_deepl_code(google_code: str) -> str | None:
     return None
 
 
+def normalize_deepl_code(code: str | None) -> str | None:
+    """Приводит код, который вернул DeepL при детекте, к ключу LANGUAGES (или None)."""
+    if not code:
+        return None
+    code = code.upper()
+    if code in LANGUAGES:
+        return code
+    if code in DEEPL_ALIAS_MAP and DEEPL_ALIAS_MAP[code] in LANGUAGES:
+        return DEEPL_ALIAS_MAP[code]
+    prefix = code.split("-")[0]
+    if prefix in LANGUAGES:
+        return prefix
+    if prefix in DEEPL_ALIAS_MAP and DEEPL_ALIAS_MAP[prefix] in LANGUAGES:
+        return DEEPL_ALIAS_MAP[prefix]
+    return None
+
+
 # ISO 639-1 код langdetect → DeepL код
 _LANGDETECT_TO_DEEPL = {
     "en": "EN", "ru": "RU", "de": "DE", "fr": "FR", "es": "ES",
@@ -295,14 +352,50 @@ _LANGDETECT_TO_DEEPL = {
     "lt": "LT", "id": "ID", "ms": "MS", "vi": "VI",
 }
 
-def detect_language_langdetect(text: str) -> str | None:
+# langdetect доверяем без DeepL только на достаточно длинном тексте и с высокой уверенностью
+LANGDETECT_MIN_LEN = 20
+LANGDETECT_MIN_PROB = 0.95
+# Для детекта через DeepL хватает начала текста — остальное зря съедает лимит символов
+DETECT_SAMPLE_LEN = 200
+
+def detect_language_langdetect(text: str, min_prob: float = 0.0) -> str | None:
     """Офлайн детект через langdetect. Возвращает DeepL-код или None."""
     try:
-        from langdetect import detect, LangDetectException
-        lang = detect(text)
-        return _LANGDETECT_TO_DEEPL.get(lang)
+        from langdetect import DetectorFactory, detect_langs
+        DetectorFactory.seed = 0  # детерминированный результат
+        best = detect_langs(text)[0]
+        if best.prob < min_prob:
+            return None
+        return _LANGDETECT_TO_DEEPL.get(best.lang)
     except Exception:
         return None
+
+
+async def detect_lang(text: str) -> str | None:
+    """Определяет язык текста, возвращает DeepL-код или None.
+    Порядок: уверенный langdetect (бесплатно) → DeepL по началу текста →
+    langdetect без порога → Google."""
+    if len(text) >= LANGDETECT_MIN_LEN:
+        code = detect_language_langdetect(text, min_prob=LANGDETECT_MIN_PROB)
+        if code:
+            return code
+
+    if deepl_translator is not None:
+        try:
+            result = await asyncio.to_thread(
+                deepl_translator.translate_text, text[:DETECT_SAMPLE_LEN], target_lang="EN-US"
+            )
+            code = normalize_deepl_code(result.detected_source_lang)
+            if code:
+                return code
+        except Exception:
+            pass
+
+    code = detect_language_langdetect(text)
+    if code:
+        return code
+
+    return google_to_deepl_code(await detect_language_google(text))
 
 
 async def transcribe_voice(file_bytes: bytes, filename: str = "audio.ogg") -> str:
@@ -328,21 +421,8 @@ async def on_text(message: Message, state: FSMContext):
     """
     uid = message.from_user.id
 
-    # ── Проверка доступа ─────────────────────────────────────────────────────
-    if not is_allowed(uid):
-        if is_auto_approve_enabled():
-            approve_user_auto(uid)
-            # Пропускаем дальше без сообщений
-        elif is_pending(uid):
-            await message.answer("✅ Заявку кря. Погоди немного.")
-            return
-        else:
-            keyboard = [[InlineKeyboardButton(text="📨 Кря", callback_data=f"request_access|{uid}")]]
-            await message.answer(
-                "🔒 Тебя прикрякнули.\n\nОтправь кря администратору:",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-            )
-            return
+    if not await ensure_access(message):
+        return
 
     # ── Обработка режима рассылки от админа ──────────────────────────────────
     if uid == ADMIN_ID:
@@ -393,61 +473,18 @@ async def on_text(message: Message, state: FSMContext):
     source = settings["source"]
     targets = settings["targets"]
     text = message.text
+    auto_speech = settings.get("auto_speech", False)
 
-    # ── Определяем язык входящего текста ─────────────────────────────────────
-    detected_deepl = None
-
-    # Шаг 1: DeepL
-    if deepl_translator is not None:
-        try:
-            import asyncio as _asyncio
-            result = await _asyncio.get_event_loop().run_in_executor(
-                None, lambda: deepl_translator.translate_text(text, target_lang="EN-US")
-            )
-            dl_code = result.detected_source_lang.upper()
-            if dl_code in LANGUAGES:
-                detected_deepl = dl_code
-            elif dl_code in DEEPL_ALIAS_MAP and DEEPL_ALIAS_MAP[dl_code] in LANGUAGES:
-                detected_deepl = DEEPL_ALIAS_MAP[dl_code]
-            else:
-                prefix = dl_code.split("-")[0]
-                if prefix in LANGUAGES:
-                    detected_deepl = prefix
-                elif prefix in DEEPL_ALIAS_MAP and DEEPL_ALIAS_MAP[prefix] in LANGUAGES:
-                    detected_deepl = DEEPL_ALIAS_MAP[prefix]
-                # иначе — DeepL вернул совсем экзотический код, идём ниже
-        except Exception:
-            detected_deepl = None
-
-    # Шаг 2: если DeepL не справился → langdetect (офлайн, надёжен)
-    if detected_deepl is None:
-        detected_deepl = detect_language_langdetect(text)
-
-    # Шаг 3: последний резерв — Google
-    if detected_deepl is None:
-        try:
-            detected_google = await detect_language_google(text)
-            candidate = google_to_deepl_code(detected_google)
-            if candidate and candidate in LANGUAGES:
-                detected_deepl = candidate
-        except Exception:
-            detected_deepl = None
+    detected = await detect_lang(text)
 
     # Если детект не сработал или совпал с source — переводим как обычно
-    if detected_deepl and detected_deepl != source:
+    if detected and detected != source:
         # Текст на другом языке → переводим на исходный
         try:
-            translated = await translate_deepl(text, detected_deepl, source)
-            if increment_translation:
-                increment_translation(uid)
-            if increment_chars:
-                increment_chars(uid, len(text))
-            text_hash = cache_text(text)
-            translated_hash = cache_text(translated)
-            kb = kb_after_translation(detected_deepl, source, text_hash, translated_hash)
-            src_flag = LANGUAGES[detected_deepl][1]
-            tgt_flag = LANGUAGES[source][1]
-            await send_translation(message.bot, uid, translated, kb, settings.get("auto_speech", False), translated, source)
+            translated = await translate_deepl(text, detected, source)
+            count_usage(uid, text)
+            kb = kb_after_translation(detected, source, cache_text(text), cache_text(translated))
+            await send_translation(message.bot, uid, html.escape(translated), kb, auto_speech, translated, source)
         except Exception as e:
             await message.answer(f"❌ Ошибка перевода: {e}")
         return
@@ -460,15 +497,9 @@ async def on_text(message: Message, state: FSMContext):
         target = targets[0]
         try:
             translated = await translate_deepl(text, source, target)
-            if increment_translation:
-                increment_translation(uid)
-            if increment_chars:
-                increment_chars(uid, len(text))
-            translated_hash = cache_text(translated)
-            kb = kb_after_translation(source, target, text_hash, translated_hash)
-            src_flag = LANGUAGES[source][1]
-            tgt_flag = LANGUAGES[target][1]
-            await send_translation(message.bot, uid, translated, kb, settings.get("auto_speech", False), translated, target)
+            count_usage(uid, text)
+            kb = kb_after_translation(source, target, text_hash, cache_text(translated))
+            await send_translation(message.bot, uid, html.escape(translated), kb, auto_speech, translated, target)
         except Exception as e:
             await message.answer(f"❌ Ошибка перевода: {e}")
     else:
@@ -482,20 +513,8 @@ async def on_voice(message: Message, state: FSMContext):
     """Голосовое сообщение → транскрибируем → переводим."""
     uid = message.from_user.id
 
-    if not is_allowed(uid):
-        if is_auto_approve_enabled():
-            approve_user_auto(uid)
-            # Пропускаем дальше без сообщений
-        elif is_pending(uid):
-            await message.answer("✅ Заявку кря. Погоди немного.")
-            return
-        else:
-            keyboard = [[InlineKeyboardButton(text="📨 Кря", callback_data=f"request_access|{uid}")]]
-            await message.answer(
-                "🔒 Тебя прикрякнули.\n\nОтправь кря администратору:",
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
-            )
-            return
+    if not await ensure_access(message):
+        return
 
     if not is_lang_configured(uid):
         await message.answer("⚙️ Сначала настрой языки командой /lang")
@@ -508,6 +527,7 @@ async def on_voice(message: Message, state: FSMContext):
     settings = get_user_settings(uid)
     source = settings["source"]
     targets = settings["targets"]
+    auto_speech = settings.get("auto_speech", False)
 
     status_msg = await message.answer("Кря 🦆")
 
@@ -534,27 +554,16 @@ async def on_voice(message: Message, state: FSMContext):
 
     # Дальше — как обычный текст
     text_hash = cache_text(text)
+    quoted = f"<i>{html.escape(text)}</i>"
 
-    # Определяем язык
-    try:
-        detected_google = await detect_language_google(text)
-        detected_deepl = google_to_deepl_code(detected_google)
-    except Exception:
-        detected_deepl = None
+    detected = await detect_lang(text)
 
-    if detected_deepl and detected_deepl != source:
+    if detected and detected != source:
         try:
-            translated = await translate_deepl(text, detected_deepl, source)
-            if increment_translation:
-                increment_translation(uid)
-            if increment_chars:
-                increment_chars(uid, len(text))
-            text_hash_tr = cache_text(text)
-            translated_hash = cache_text(translated)
-            kb = kb_after_translation(detected_deepl, source, text_hash_tr, translated_hash)
-            src_flag = LANGUAGES[detected_deepl][1]
-            tgt_flag = LANGUAGES[source][1]
-            await send_translation(message.bot, uid, f"_{text}_\n{translated}", kb, settings.get("auto_speech", False), translated, source)
+            translated = await translate_deepl(text, detected, source)
+            count_usage(uid, text)
+            kb = kb_after_translation(detected, source, text_hash, cache_text(translated))
+            await send_translation(message.bot, uid, f"{quoted}\n{html.escape(translated)}", kb, auto_speech, translated, source)
         except Exception as e:
             await message.answer(f"❌ Ошибка перевода: {e}")
         return
@@ -563,20 +572,14 @@ async def on_voice(message: Message, state: FSMContext):
         target = targets[0]
         try:
             translated = await translate_deepl(text, source, target)
-            if increment_translation:
-                increment_translation(uid)
-            if increment_chars:
-                increment_chars(uid, len(text))
-            translated_hash = cache_text(translated)
-            kb = kb_after_translation(source, target, text_hash, translated_hash)
-            src_flag = LANGUAGES[source][1]
-            tgt_flag = LANGUAGES[target][1]
-            await send_translation(message.bot, uid, f"_{text}_\n{translated}", kb, settings.get("auto_speech", False), translated, target)
+            count_usage(uid, text)
+            kb = kb_after_translation(source, target, text_hash, cache_text(translated))
+            await send_translation(message.bot, uid, f"{quoted}\n{html.escape(translated)}", kb, auto_speech, translated, target)
         except Exception as e:
             await message.answer(f"❌ Ошибка перевода: {e}")
     else:
         kb = kb_translate_targets(targets, text_hash)
-        await message.answer(f"На какой язык кря?\n\n_{text}_", parse_mode="Markdown", reply_markup=kb)
+        await message.answer(f"На какой язык кря?\n\n{quoted}", parse_mode="HTML", reply_markup=kb)
 
 
 # ─── Callback: выбор языка перевода ──────────────────────────────────────────
@@ -584,6 +587,8 @@ async def on_voice(message: Message, state: FSMContext):
 @router.callback_query(F.data.startswith("translate|"))
 async def cb_translate(callback: CallbackQuery):
     """Пользователь выбрал язык перевода."""
+    if not await check_callback_access(callback):
+        return
     _, target, text_hash = callback.data.split("|")
     uid = callback.from_user.id
 
@@ -598,15 +603,9 @@ async def cb_translate(callback: CallbackQuery):
     await callback.answer()
     try:
         translated = await translate_deepl(text, source, target)
-        if increment_translation:
-            increment_translation(uid)
-        if increment_chars:
-            increment_chars(uid, len(text))
-        translated_hash = cache_text(translated)
-        kb = kb_after_translation(source, target, text_hash, translated_hash)
-        src_flag = LANGUAGES[source][1]
-        tgt_flag = LANGUAGES[target][1]
-        await send_translation(callback.bot, uid, translated, kb, settings.get("auto_speech", False), translated, target)
+        count_usage(uid, text)
+        kb = kb_after_translation(source, target, text_hash, cache_text(translated))
+        await send_translation(callback.bot, uid, html.escape(translated), kb, settings.get("auto_speech", False), translated, target)
     except Exception as e:
         await callback.message.answer(f"❌ Ошибка перевода: {e}")
 
@@ -616,6 +615,8 @@ async def cb_translate(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("back|"))
 async def cb_back(callback: CallbackQuery):
     """Обратный перевод."""
+    if not await check_callback_access(callback):
+        return
     _, source_lang, target_lang, text_hash = callback.data.split("|")
 
     text = get_cached_text(text_hash)
@@ -626,15 +627,8 @@ async def cb_back(callback: CallbackQuery):
     await callback.answer()
     try:
         translated = await translate_deepl(text, target_lang, source_lang)
-        uid = callback.from_user.id
-        if increment_translation:
-            increment_translation(uid)
-        if increment_chars:
-            increment_chars(uid, len(text))
-        translated_hash = cache_text(translated)
-        kb = kb_after_translation(target_lang, source_lang, text_hash, translated_hash)
-        src_flag = LANGUAGES[target_lang][1]
-        tgt_flag = LANGUAGES[source_lang][1]
+        count_usage(callback.from_user.id, text)
+        kb = kb_after_translation(target_lang, source_lang, text_hash, cache_text(translated))
         await callback.message.answer(translated, reply_markup=kb)
     except Exception as e:
         await callback.message.answer(f"❌ Ошибка перевода: {e}")
@@ -645,6 +639,8 @@ async def cb_back(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("google|"))
 async def cb_google(callback: CallbackQuery):
     """Перевод через Google Translate."""
+    if not await check_callback_access(callback):
+        return
     _, source_lang, target_lang, text_hash = callback.data.split("|")
 
     text = get_cached_text(text_hash)
@@ -655,8 +651,6 @@ async def cb_google(callback: CallbackQuery):
     await callback.answer()
     try:
         translated = await translate_google(text, source_lang, target_lang)
-        src_flag = LANGUAGES[source_lang][1]
-        tgt_flag = LANGUAGES[target_lang][1]
         await callback.message.answer(f"🌐 {translated}")
     except Exception as e:
         await callback.message.answer(f"❌ Ошибка Google перевода: {e}")
@@ -667,6 +661,8 @@ async def cb_google(callback: CallbackQuery):
 @router.callback_query(F.data.startswith("speak|"))
 async def cb_speak(callback: CallbackQuery, bot: Bot):
     """Озвучка текста через Google TTS."""
+    if not await check_callback_access(callback):
+        return
     _, text_hash, lang_code = callback.data.split("|")
 
     text = get_cached_text(text_hash)
@@ -683,7 +679,6 @@ async def cb_speak(callback: CallbackQuery, bot: Bot):
         return
 
     # Отправляем как голосовое сообщение (aiogram 3.x требует BufferedInputFile)
-    from aiogram.types import BufferedInputFile
     audio_file = BufferedInputFile(audio_data, filename="speech.mp3")
     await bot.send_voice(chat_id=callback.from_user.id, voice=audio_file)
 
@@ -703,8 +698,9 @@ async def cb_user_reply(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("request_access|"))
 async def on_request_access(callback: CallbackQuery):
     """Пользователь нажал кнопку 'Кря' для запроса доступа."""
-    requester_id = int(callback.data.split("|")[1])
+    # ID берём у нажавшего, а не из callback_data — кнопку мог нажать кто-то другой
     user = callback.from_user
+    requester_id = user.id
 
     if is_pending(requester_id):
         await callback.answer()
@@ -732,10 +728,6 @@ async def on_request_access(callback: CallbackQuery):
 
     username_display = f"@{username}" if username else "нет username"
 
-    keyboard = [[
-        InlineKeyboardButton(text="✅ Кря", callback_data=f"admin_approve|{requester_id}"),
-        InlineKeyboardButton(text="❌ Кря", callback_data=f"admin_deny|{requester_id}"),
-    ]]
     try:
         await callback.bot.send_message(
             chat_id=ADMIN_ID,
@@ -743,7 +735,7 @@ async def on_request_access(callback: CallbackQuery):
                  f"Имя: {name}\n"
                  f"Username: {username_display}\n"
                  f"ID: {requester_id}",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard)
+            reply_markup=kb_admin_approve(requester_id)
         )
     except Exception:
         pass
