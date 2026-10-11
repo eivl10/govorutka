@@ -173,6 +173,8 @@ python3 -m pyflakes bot_part*.py main.py voicebot/*.py
 - TTS проверен с сервера: gTTS из контейнера отдаёт аудио, Google отвечает ~0,1 с. Ошибка «Failed to connect» была во время перегрузки сервера (рестарт-луп мусорного контейнера, load ~8); сейчас load ~0,3. Живой тест с телефона не делался.
 - Удалено на dragan: контейнер `govorutka-utka-1`, образ `govorutka-utka`, `voicebot/.env.bak`, корневой `/home/agent-google/govorutka/docker-compose.yml` (чтобы `docker compose up` в корне не пересоздал Утку с пустым токеном). В репо корневой compose оставлен: он для настоящей Утки (она на 62yun).
 - Что на dragan осталось: `govorutka/voicebot/` (деплой бота), корневые `bot_part*.py`, `.env`, пустая `data/` — без запуска, не нужны.
+- Выкачено на dragan (`git pull` + `docker compose up -d --build` в `voicebot/`): коммит `cc67080` (edge-tts основной, gTTS запасной) и `717a6da` (edge-tts 6.1.18 → 7.2.8: старая версия получала 403 от Bing, 7.2.8 работает). Проверено изнутри контейнера: EN-GB, DE — edge-tts, прямой вызов ok.
+- Известно: на смешанном тексте с RU-голосом edge-tts вернул «No audio received» и сработал запасной gTTS. Не критично, не разбирали (проверить голос `RU` в `voicebot/tts.py`, если появится жалоба на качество русского).
 - Деплой Говорутки: только из `voicebot/` (`sudo docker compose up -d --build`).
 - Исправлен IP в `F:\Vibecoding\Claude\dragan_vps_access.md` (был `34.71.76.28`).
 
