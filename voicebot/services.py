@@ -4,7 +4,6 @@
 # в три шага (DeepL → langdetect → Google), Groq Whisper для STT, gTTS для TTS.
 
 import asyncio
-import io
 
 import deepl
 import httpx
@@ -105,15 +104,6 @@ async def transcribe_voice(file_bytes: bytes, filename: str = "audio.ogg") -> st
 
 
 async def synthesize_speech(text: str, lang_code: str) -> bytes:
-    """Синтез речи через gTTS. Возвращает MP3 в bytes."""
-    from gtts import gTTS
-
-    tts_lang = GOOGLE_TTS_LANGS.get(lang_code, "en")
-
-    def _synth() -> bytes:
-        buf = io.BytesIO()
-        gTTS(text=text, lang=tts_lang).write_to_fp(buf)
-        buf.seek(0)
-        return buf.read()
-
-    return await asyncio.to_thread(_synth)
+    """Синтез речи (edge-tts → gTTS). Возвращает MP3 в bytes."""
+    from tts import synthesize
+    return await synthesize(text, lang_code, GOOGLE_TTS_LANGS.get(lang_code, "en"))

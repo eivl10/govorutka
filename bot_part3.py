@@ -10,7 +10,6 @@
 
 import asyncio
 import html
-import io
 import hashlib
 import deepl
 import httpx
@@ -140,23 +139,9 @@ async def send_translation(bot_obj, chat_id, text, reply_markup, auto_speech=Fal
             pass
 
 async def synthesize_speech(text: str, lang_code: str) -> bytes:
-    """
-    Синтез речи через gTTS (Google Text-to-Speech).
-    Возвращает MP3-данные в bytes.
-    """
-    from gtts import gTTS
-
-    tts_lang = GOOGLE_TTS_LANGS.get(lang_code, "en")
-
-    def _synth():
-        buf = io.BytesIO()
-        tts = gTTS(text=text, lang=tts_lang)
-        tts.write_to_fp(buf)
-        buf.seek(0)
-        return buf.read()
-
-    # Запускаем блокирующий gTTS в отдельном потоке
-    return await asyncio.to_thread(_synth)
+    """Синтез речи (edge-tts → gTTS). Возвращает MP3-данные в bytes."""
+    from tts import synthesize
+    return await synthesize(text, lang_code, GOOGLE_TTS_LANGS.get(lang_code, "en"))
 
 
 # ─── Проверка доступа ────────────────────────────────────────────────────────
