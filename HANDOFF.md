@@ -166,3 +166,41 @@ python3 -m pyflakes bot_part*.py main.py voicebot/*.py
 - Инлайн-кнопки — только эмодзи, без текстовых подписей. Единственное
   подтверждённое исключение — пикер языков в voicebot (флаг + название).
 - Комментарии в коде — по-русски, короткие, объясняют «почему», а не «что».
+
+## Итог 2026-10-11: Говорутка работает (разделы ниже за 10.10 — история)
+
+- Владелец выпустил новый токен `@govorutka_bot` и внёс в `voicebot/.env` на dragan (`35.254.211.97`, `agent-google`, доступ — `F:\Vibecoding\_Доступы\dragan_vps_access.md`). `govorutka-bot` пересоздан, лог «Кря! Бот запущен 🦆», 401 нет.
+- TTS проверен с сервера: gTTS из контейнера отдаёт аудио, Google отвечает ~0,1 с. Ошибка «Failed to connect» была во время перегрузки сервера (рестарт-луп мусорного контейнера, load ~8); сейчас load ~0,3. Живой тест с телефона не делался.
+- Удалено на dragan: контейнер `govorutka-utka-1`, образ `govorutka-utka`, `voicebot/.env.bak`, корневой `/home/agent-google/govorutka/docker-compose.yml` (чтобы `docker compose up` в корне не пересоздал Утку с пустым токеном). В репо корневой compose оставлен: он для настоящей Утки (она на 62yun).
+- Что на dragan осталось: `govorutka/voicebot/` (деплой бота), корневые `bot_part*.py`, `.env`, пустая `data/` — без запуска, не нужны.
+- Деплой Говорутки: только из `voicebot/` (`sudo docker compose up -d --build`).
+- Исправлен IP в `F:\Vibecoding\Claude\dragan_vps_access.md` (был `34.71.76.28`).
+
+## Диагноз и починка 2026-10-10 (история, закрыто)
+
+Два бота, разные серверы:
+
+- **Утка `@transduck_bot`** — работает. Живёт на 62yun (`45.150.192.62`), контейнер `transutka-utka-bot-1`, getMe ok. Не трогалась.
+- **Говорутка `@govorutka_bot`** — НЕ работает. Причина: токен отозван в BotFather. С 2026-10-09 22:55 UTC Telegram отвечает `401 Unauthorized` на токен из `voicebot/.env` (dragan, контейнер `govorutka-bot`). Проверено getMe с хоста и изнутри контейнера. Бот работал до этого: лог «Кря! Бот запущен» 2026-09-29, далее таймауты сети (с 30.09) и потом 401. Таймауты сами по себе не причина.
+- Ошибочная путаница: контейнер `govorutka-utka-1` на dragan — НЕ Утка. У него пустой `BOT_TOKEN`, ни с каким живым ботом он не связан.
+
+Сделано 2026-10-10:
+
+- `govorutka-utka-1` остановлен: `docker compose stop utka` в `/home/agent-google/govorutka`. Не удалён. Было ~13 971 рестартов, нагрузка сервера ~8, load сейчас падает. При ручном stop `restart: unless-stopped` не поднимает контейнер сам.
+- `.env`, `docker-compose.yml`, код не менялись.
+- `govorutka-bot` оставлен запущенным. Крутит retry на 401 раз в ~5 с, с другими процессами не конфликтует. После выдачи нового токена его надо пересоздать (см. ниже).
+- Токены в отчёт и в этот файл не записаны.
+- Искать другой рабочий токен Говорутки негде: единственная его копия на dragan — `voicebot/.env`, она мёртвая.
+
+Что нужно от владельца (одна фраза): выпустить новый токен `@govorutka_bot` в BotFather (`/mybots` → `@govorutka_bot` → API Token → Revoke/Generate) и прислать его в чат.
+
+Что сделать после получения токена (на dragan):
+
+1. Резерв: `cp /home/agent-google/govorutka/voicebot/.env /home/agent-google/govorutka/voicebot/.env.bak`, проверить, что файл появился.
+2. Вписать новый `BOT_TOKEN=` в `voicebot/.env`, не трогая остальные строки.
+3. `cd /home/agent-google/govorutka/voicebot && sudo docker compose up -d --force-recreate`.
+4. Проверка: `sudo docker logs govorutka-bot --tail 20` — строка «Кря! Бот запущен»; `getMe` с новым токеном — `ok: true`, username `govorutka_bot`.
+
+Не сделано, по решению владельца: `govorutka-utka-1` не удалён (`docker compose rm` не делали). Если Говорутке нужен отдельный сервис Утки на dragan — не нужен, Утка на 62yun. Можно удалить остановленный контейнер.
+
+Побочно: `blyabot` при проверке был `Up 13 seconds` (перезапущен не мной). Сейчас running, exit 0, restarts 0.
