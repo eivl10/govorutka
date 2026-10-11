@@ -1,6 +1,16 @@
+version: '3.8'
+
 services:
   voicebot:
     build: .
+    container_name: govorutka-bot
     restart: unless-stopped
+    mem_limit: 250m
+    memswap_limit: 512m
     env_file:
       - .env
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
